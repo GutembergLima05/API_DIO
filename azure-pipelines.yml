@@ -1,0 +1,86 @@
+﻿trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  buildConfiguration: Release
+  project: 'API_DIO.csproj'
+  artifactName: drop
+  # Atualize estes valores na UI do pipeline (Variables) ou aqui no YAML
+  azureSubscription: 'GutembergSub001'
+  webAppName: 'APIO001'
+
+stages:
+- stage: Build
+  displayName: Build and Publish
+  jobs:
+  - job: Build
+    displayName: Build
+    steps:
+    - checkout: self
+
+    - task: UseDotNet@2
+      displayName: 'Use .NET 8 SDK'
+      inputs:
+        packageType: 'sdk'
+        version: '8.x'
+
+    - script: dotnet restore $(project)
+      displayName: Restore
+
+    - script: dotnet build $(project) -c $(buildConfiguration) --no-restore
+      displayName: Build
+
+    - script: |
+        # Executa testes se existirem projetos *Tests.csproj; não falha se não houver
+        set -e
+        if ls **/*Tests.csproj 1> /dev/null 2>&1; then
+          dotnet test **/*Tests.csproj -c $(buildConfiguration) --no-build --logger:"trx"
+        else
+          echo "Nenhum projeto de teste encontrado, pulando etapa de testes."
+        fi
+      displayName: Test
+      workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+    - script: dotnet publish $(project) -c $(buildConfiguration) -o $(Build.ArtifactStagingDirectory)/publish /p:UseAppHost=false
+      displayName: Publish
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive publish output'
+      inputs:
+        rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/publish'
+        includeRootFolder: false
+        archiveType: zip
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+        replaceExistingArchive: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: '$(artifactName)'
+        publishLocation: Container
+
+- stage: Deploy
+  displayName: Deploy to Azure Web App
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: DeployWeb
+    displayName: Deploy
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: $(artifactName)
+
+          - task: AzureWebApp@1
+            displayName: 'Deploy to Azure App Service'
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              appName: '$(webAppName)'
+              package: '$(Pipeline.Workspace)/$(artifactName)/$(Build.BuildId).zip'
